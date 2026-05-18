@@ -495,7 +495,7 @@ def _quantization_cache_path(
 ) -> tuple[str, dict]:
     signature = _checkpoint_signature(model_path)
     key_payload = {
-        "cache_version": 1,
+        "cache_version": 2,
         "signature": signature,
         "mode": mode,
         "dtype": _dtype_name(dtype),
@@ -918,6 +918,17 @@ def _load_weight_only_quantized_model_streaming(
                 module = model.get_submodule(module_name) if module_name else model
 
                 if attr_name == "weight" and isinstance(module, torch.nn.Linear):
+                    existing_bias = module.bias
+                    quantized_bias = None
+                    if existing_bias is not None and not existing_bias.is_meta:
+                        quantized_bias = existing_bias.detach()
+                        if quantized_bias.is_floating_point():
+                            quantized_bias = quantized_bias.to(
+                                device=target_device,
+                                dtype=dtype,
+                            )
+                        else:
+                            quantized_bias = quantized_bias.to(device=target_device)
                     qweight, scale, q_codebook = _quantize_weight_tensor(
                         tensor,
                         mode,
@@ -931,7 +942,7 @@ def _load_weight_only_quantized_model_streaming(
                         qweight=qweight,
                         scale=scale,
                         codebook=q_codebook,
-                        bias=None,
+                        bias=quantized_bias,
                         chunk_size=quantized_linear_chunk_size,
                     )
                     _replace_module(model, module_name, quantized)
