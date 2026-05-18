@@ -1,0 +1,173 @@
+{
+  "MimoASRLoadModel": {
+    "display_name": "MiMo ASR 加载模型",
+    "description": "加载 MiMo-V2.5-ASR 和 MiMo-Audio-Tokenizer，用于语音识别。",
+    "inputs": {
+      "model_root": {
+        "name": "模型根目录",
+        "tooltip": "包含 MiMo 模型文件夹的根目录。auto 表示使用 ComfyUI/models。"
+      },
+      "download_missing": {
+        "name": "缺失时下载",
+        "tooltip": "模型文件夹不存在时自动下载。"
+      },
+      "download_source": {
+        "name": "下载源",
+        "tooltip": "模型下载来源。",
+        "options": {
+          "huggingface": "Hugging Face",
+          "hf-mirror": "HF-Mirror（国内镜像）",
+          "offline": "离线"
+        }
+      },
+      "revision": {
+        "name": "版本",
+        "tooltip": "可选的 Hugging Face revision、分支或提交。"
+      },
+      "device": {
+        "name": "模型设备",
+        "tooltip": "ASR 语言模型使用的设备。",
+        "options": {
+          "auto": "自动",
+          "cuda": "CUDA",
+          "cpu": "CPU"
+        }
+      },
+      "mel_device": {
+        "name": "梅尔频谱设备",
+        "tooltip": "梅尔频谱处理使用的设备。",
+        "options": {
+          "cpu": "CPU",
+          "cuda": "CUDA",
+          "auto": "自动"
+        }
+      },
+      "audio_tokenizer_device": {
+        "name": "音频分词器设备",
+        "tooltip": "MiMo-Audio-Tokenizer 使用的设备。",
+        "options": {
+          "auto": "自动",
+          "cpu": "CPU",
+          "cuda": "CUDA"
+        }
+      },
+      "quantization": {
+        "name": "量化",
+        "tooltip": "ASR 模型的权重量化模式。",
+        "options": {
+          "none": "无",
+          "int8": "INT8",
+          "int4": "INT4",
+          "nf4": "NF4",
+          "fp4": "FP4",
+          "fp8": "FP8"
+        }
+      },
+      "use_quantization_cache": {
+        "name": "使用量化缓存",
+        "tooltip": "在 ComfyUI/models 下保存并复用量化权重缓存。"
+      },
+      "rebuild_quantization_cache": {
+        "name": "重建量化缓存",
+        "tooltip": "忽略已有量化缓存并重新生成。"
+      },
+      "bnb_4bit_compute_dtype": {
+        "name": "4bit 计算精度",
+        "tooltip": "兼容 bitsandbytes 风格设置的选项。",
+        "options": {
+          "auto": "自动",
+          "float16": "float16",
+          "bfloat16": "bfloat16",
+          "float32": "float32"
+        }
+      },
+      "bnb_4bit_double_quant": {
+        "name": "4bit 双重量化",
+        "tooltip": "兼容 bitsandbytes 风格设置的选项。"
+      },
+      "quantized_linear_chunk_size": {
+        "name": "量化线性层分块大小",
+        "tooltip": "大型量化 Linear 层每块反量化的行数。设为 0 表示禁用分块。"
+      },
+      "progress": {
+        "name": "显示进度",
+        "tooltip": "在控制台打印详细的加载和推理进度。"
+      },
+      "progress_interval": {
+        "name": "进度刷新间隔",
+        "tooltip": "两次进度更新之间的最小秒数。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "MiMo ASR 模型",
+        "tooltip": "已加载的 MiMo ASR 模型。"
+      }
+    }
+  },
+  "MimoASRAudioToText": {
+    "display_name": "MiMo ASR 音频转文本",
+    "description": "使用已加载的 MiMo ASR 模型转写 ComfyUI 音频。",
+    "inputs": {
+      "mimo_asr_model": {
+        "name": "MiMo ASR 模型",
+        "tooltip": "由加载模型节点输出的 MiMo ASR 模型。"
+      },
+      "audio": {
+        "name": "音频",
+        "tooltip": "ComfyUI 原生音频输入。"
+      },
+      "language": {
+        "name": "语言",
+        "tooltip": "语音识别的语言提示。",
+        "options": {
+          "auto": "自动",
+          "zh": "中文",
+          "en": "英文"
+        }
+      },
+      "max_new_tokens": {
+        "name": "最大新词元数",
+        "tooltip": "生成文本词元组的最大数量。"
+      },
+      "audio_start_seconds": {
+        "name": "音频起始秒数",
+        "tooltip": "音频截取的起始偏移，单位为秒。"
+      },
+      "audio_duration_seconds": {
+        "name": "音频持续秒数",
+        "tooltip": "音频截取时长，单位为秒。设为 0 表示使用剩余全部音频。"
+      },
+      "batch_index": {
+        "name": "批次索引",
+        "tooltip": "从批量音频中选择要转写的批次索引。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "文本",
+        "tooltip": "语音识别得到的文本。"
+      }
+    }
+  },
+  "MimoASRUnloadModel": {
+    "display_name": "MiMo ASR 释放模型",
+    "description": "释放已加载的 MiMo ASR 模型，并可清理 CUDA 缓存。",
+    "inputs": {
+      "mimo_asr_model": {
+        "name": "MiMo ASR 模型",
+        "tooltip": "需要释放的 MiMo ASR 模型。"
+      },
+      "clear_cuda_cache": {
+        "name": "清理 CUDA 缓存",
+        "tooltip": "释放模型后清理 CUDA 缓存。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "状态",
+        "tooltip": "模型释放状态。"
+      }
+    }
+  }
+}
