@@ -1,6 +1,6 @@
-# ComfyUI-MIMOASR
+# Comfy-MIMOASR
 
-ComfyUI-MIMOASR wraps Xiaomi MiMo-V2.5-ASR as native ComfyUI audio nodes.
+Comfy-MIMOASR wraps Xiaomi MiMo-V2.5-ASR as native ComfyUI audio nodes.
 
 ## Nodes
 
@@ -9,6 +9,7 @@ ComfyUI-MIMOASR wraps Xiaomi MiMo-V2.5-ASR as native ComfyUI audio nodes.
 | `MiMo ASR Load Model` | Loads MiMo-V2.5-ASR and MiMo-Audio-Tokenizer. |
 | `MiMo ASR Audio To Text` | Converts ComfyUI `AUDIO` input to a text transcript. |
 | `MiMo ASR Release Model` | Releases the loaded model weights and clears CUDA cache. |
+| `MiMo ASR Save Text` | Saves input text as an auto-numbered `.txt` file. |
 
 ## Model Layout
 
@@ -33,7 +34,7 @@ downloading.
 
 ## Install
 
-Place this folder under `ComfyUI/custom_nodes/ComfyUI-MIMOASR`, then install the
+Place this folder under `ComfyUI/custom_nodes/Comfy-MIMOASR`, then install the
 requirements in the same Python environment used by ComfyUI:
 
 ```bash
@@ -48,7 +49,8 @@ Restart ComfyUI after installation.
 2. Connect its `mimo_asr_model` output to `MiMo ASR Audio To Text`.
 3. Connect a ComfyUI native `AUDIO` output to the `audio` input.
 4. Use the returned `STRING` output as transcript text.
-5. Optionally run `MiMo ASR Release Model` when you want to unload weights.
+5. Optionally connect the transcript to `MiMo ASR Save Text` to write a `.txt` file.
+6. Optionally run `MiMo ASR Release Model` when you want to unload weights.
 
 The loader exposes the same core loading controls as the original demo:
 device placement, mel/audio-tokenizer device, quantization, quantization cache,
@@ -56,6 +58,11 @@ chunk size, progress logging, and bitsandbytes-compatible options.
 
 The transcription node exposes language hint, generation token limit, audio
 start offset, duration clipping, and batch selection for batched ComfyUI audio.
+The default generation token limit is 128.
+
+The save text node defaults to ComfyUI's `output` directory and names files like
+`transcript_00001_.txt`. Use `filename_prefix` for output subfolders or
+`output_directory` for a custom save directory.
 
 ## Localization
 

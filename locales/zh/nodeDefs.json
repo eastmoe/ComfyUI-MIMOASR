@@ -169,5 +169,29 @@
         "tooltip": "模型释放状态。"
       }
     }
+  },
+  "MimoASRSaveText": {
+    "display_name": "MiMo ASR 保存文本",
+    "description": "将输入文本保存为自动编号的 txt 文件。",
+    "inputs": {
+      "text": {
+        "name": "文本",
+        "tooltip": "需要保存的文本。"
+      },
+      "filename_prefix": {
+        "name": "文件名前缀",
+        "tooltip": "保存文件名前缀。支持子文件夹，例如 transcripts/session。"
+      },
+      "output_directory": {
+        "name": "保存目录",
+        "tooltip": "保存目录。auto 表示 ComfyUI/output；也支持自定义绝对或相对路径。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "保存路径",
+        "tooltip": "已保存 txt 文件的完整路径。"
+      }
+    }
   }
 }

@@ -49,6 +49,12 @@ def _comfy_models_dir() -> Path:
     return Path.cwd() / "models"
 
 
+def _comfy_output_dir() -> Path:
+    if folder_paths is not None and hasattr(folder_paths, "get_output_directory"):
+        return Path(folder_paths.get_output_directory())
+    return Path.cwd() / "output"
+
+
 def _resolve_model_root(model_root: str) -> Path:
     model_root = (model_root or "auto").strip()
     if not model_root or model_root.lower() == "auto":
@@ -288,7 +294,7 @@ def _audio_from_comfy(audio: dict[str, Any], *, target_sample_rate: int, batch_i
 
 
 class MimoASRLoadModel:
-    CATEGORY = "audio/ComfyUI-MIMOASR"
+    CATEGORY = "audio/Comfy-MIMOASR"
     DESCRIPTION = "Load MiMo-V2.5-ASR and MiMo-Audio-Tokenizer for transcription."
     RETURN_TYPES = ("MIMOASR_MODEL",)
     RETURN_NAMES = ("mimo_asr_model",)
@@ -361,7 +367,7 @@ class MimoASRLoadModel:
                 ),
                 "progress": (
                     "BOOLEAN",
-                    {"default": False, "tooltip": "Print detailed load and inference progress to the console."},
+                    {"default": True, "tooltip": "Print detailed load and inference progress to the console."},
                 ),
                 "progress_interval": (
                     "FLOAT",
@@ -449,7 +455,7 @@ class MimoASRLoadModel:
 
 
 class MimoASRAudioToText:
-    CATEGORY = "audio/ComfyUI-MIMOASR"
+    CATEGORY = "audio/Comfy-MIMOASR"
     DESCRIPTION = "Transcribe ComfyUI AUDIO input with a loaded MiMo ASR model."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
@@ -471,7 +477,7 @@ class MimoASRAudioToText:
                 "max_new_tokens": (
                     "INT",
                     {
-                        "default": 8192,
+                        "default": 128,
                         "min": 1,
                         "max": 65536,
                         "step": 1,
@@ -537,7 +543,7 @@ class MimoASRAudioToText:
 
 
 class MimoASRUnloadModel:
-    CATEGORY = "audio/ComfyUI-MIMOASR"
+    CATEGORY = "audio/Comfy-MIMOASR"
     DESCRIPTION = "Release a loaded MiMo ASR model and optionally clear CUDA cache."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("status",)
@@ -563,14 +569,89 @@ class MimoASRUnloadModel:
         return (mimo_asr_model.release(clear_cuda_cache=bool(clear_cuda_cache)),)
 
 
+class MimoASRSaveText:
+    CATEGORY = "audio/Comfy-MIMOASR"
+    DESCRIPTION = "Save input text as a numbered txt file."
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("saved_path",)
+    FUNCTION = "save_text"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"forceInput": True, "tooltip": "Text to save."}),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": "Comfy-MIMOASR/transcript",
+                        "tooltip": "File prefix. Subfolders are supported, for example transcripts/session.",
+                    },
+                ),
+                "output_directory": (
+                    "STRING",
+                    {
+                        "default": "auto",
+                        "tooltip": "Save directory. auto uses ComfyUI/output; absolute and relative custom paths are supported.",
+                    },
+                ),
+            }
+        }
+
+    def save_text(self, text: str, filename_prefix: str = "Comfy-MIMOASR/transcript", output_directory: str = "auto"):
+        save_root = (output_directory or "auto").strip()
+        if not save_root or save_root.lower() == "auto":
+            output_dir = _comfy_output_dir()
+        else:
+            output_dir = Path(save_root).expanduser()
+            if not output_dir.is_absolute():
+                output_dir = (Path.cwd() / output_dir).resolve()
+
+        filename_prefix = (filename_prefix or "Comfy-MIMOASR/transcript").strip() or "Comfy-MIMOASR/transcript"
+        if folder_paths is not None and hasattr(folder_paths, "get_save_image_path"):
+            full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+                filename_prefix,
+                str(output_dir),
+            )
+            output_folder = Path(full_output_folder)
+        else:
+            normalized_prefix = Path(filename_prefix)
+            subfolder = str(normalized_prefix.parent) if str(normalized_prefix.parent) != "." else ""
+            filename = normalized_prefix.name
+            output_folder = output_dir / subfolder
+            output_folder.mkdir(parents=True, exist_ok=True)
+            existing = []
+            for path in output_folder.glob(f"{filename}_*.txt"):
+                suffix = path.stem.removeprefix(f"{filename}_").split("_", 1)[0]
+                if suffix.isdigit():
+                    existing.append(int(suffix))
+            counter = max(existing, default=0) + 1
+
+        output_folder.mkdir(parents=True, exist_ok=True)
+        file = f"{filename}_{counter:05}_.txt"
+        saved_path = output_folder / file
+        saved_path.write_text(str(text), encoding="utf-8")
+
+        return {
+            "ui": {
+                "text": [str(saved_path)],
+                "files": [{"filename": file, "subfolder": subfolder, "type": "output"}],
+            },
+            "result": (str(saved_path),),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "MimoASRLoadModel": MimoASRLoadModel,
     "MimoASRAudioToText": MimoASRAudioToText,
     "MimoASRUnloadModel": MimoASRUnloadModel,
+    "MimoASRSaveText": MimoASRSaveText,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MimoASRLoadModel": "MiMo ASR Load Model",
     "MimoASRAudioToText": "MiMo ASR Audio To Text",
     "MimoASRUnloadModel": "MiMo ASR Release Model",
+    "MimoASRSaveText": "MiMo ASR Save Text",
 }

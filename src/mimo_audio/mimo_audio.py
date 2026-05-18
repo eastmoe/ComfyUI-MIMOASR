@@ -510,6 +510,7 @@ def _empty_quantized_linear_from_linear(
     mode: str,
     *,
     chunk_size: int | None,
+    has_bias: bool | None = None,
 ) -> _WeightOnlyQuantizedLinear:
     out_features = linear.out_features
     in_features = linear.in_features
@@ -541,8 +542,11 @@ def _empty_quantized_linear_from_linear(
     else:
         raise ValueError(f"Unsupported quantization cache mode: {mode}")
 
+    if has_bias is None:
+        has_bias = linear.bias is not None
+
     bias = None
-    if linear.bias is not None:
+    if has_bias:
         bias = torch.empty((out_features,), dtype=linear.bias.dtype, device="meta")
 
     return _WeightOnlyQuantizedLinear.from_quantized_tensors(
@@ -563,6 +567,7 @@ def _replace_quantized_modules_from_names(
     *,
     mode: str,
     chunk_size: int | None,
+    state_dict: dict[str, torch.Tensor] | None = None,
 ) -> None:
     for module_name in module_names:
         module = model.get_submodule(module_name)
@@ -578,6 +583,7 @@ def _replace_quantized_modules_from_names(
                 module,
                 mode,
                 chunk_size=chunk_size,
+                has_bias=None if state_dict is None else f"{module_name}.bias" in state_dict,
             ),
         )
 
@@ -864,13 +870,15 @@ def _load_weight_only_quantized_model_streaming(
                 quantized_module_names = payload["quantized_module_names"]
                 with torch.device("meta"):
                     model = MiMoAudioForCausalLM(config, model_args)
+                state_dict = payload["state_dict"]
                 _replace_quantized_modules_from_names(
                     model,
                     quantized_module_names,
                     mode=mode,
                     chunk_size=quantized_linear_chunk_size,
+                    state_dict=state_dict,
                 )
-                model.load_state_dict(payload["state_dict"], strict=True, assign=True)
+                model.load_state_dict(state_dict, strict=True, assign=True)
                 _materialize_meta_rotary_buffers(model, target_device)
                 _raise_if_model_has_meta_tensors(model)
                 print(
