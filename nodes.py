@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ LANGUAGE_TAGS = {
 }
 
 _MODEL_CACHE: dict[tuple[Any, ...], "MimoASRModelHandle"] = {}
+_SILERO_VAD_CACHE: dict[str, Any] = {}
 
 
 def _comfy_models_dir() -> Path:
@@ -268,7 +270,7 @@ class MimoASRModelHandle:
             )
 
 
-def _audio_from_comfy(audio: dict[str, Any], *, target_sample_rate: int, batch_index: int) -> torch.Tensor:
+def _select_comfy_waveform(audio: dict[str, Any], *, batch_index: int) -> tuple[torch.Tensor, int]:
     if not isinstance(audio, dict) or "waveform" not in audio:
         raise TypeError("Expected ComfyUI AUDIO input with waveform and sample_rate.")
 
@@ -280,10 +282,17 @@ def _audio_from_comfy(audio: dict[str, Any], *, target_sample_rate: int, batch_i
     if waveform.ndim == 3:
         batch_index = max(0, min(int(batch_index), waveform.shape[0] - 1))
         waveform = waveform[batch_index]
-    elif waveform.ndim not in {1, 2}:
+    elif waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim != 2:
         raise ValueError(f"Unsupported AUDIO waveform shape: {tuple(waveform.shape)}")
 
-    sample_rate = int(audio.get("sample_rate") or target_sample_rate)
+    sample_rate = int(audio.get("sample_rate") or 16000)
+    return waveform.contiguous(), sample_rate
+
+
+def _audio_from_comfy(audio: dict[str, Any], *, target_sample_rate: int, batch_index: int) -> torch.Tensor:
+    waveform, sample_rate = _select_comfy_waveform(audio, batch_index=batch_index)
     if sample_rate != target_sample_rate:
         waveform = torchaudio.functional.resample(
             waveform,
@@ -291,6 +300,182 @@ def _audio_from_comfy(audio: dict[str, Any], *, target_sample_rate: int, batch_i
             new_freq=target_sample_rate,
         )
     return waveform.contiguous()
+
+
+def _resolve_vad_model_path(vad_model_path: str) -> Path:
+    vad_model_path = (vad_model_path or "auto").strip()
+    if not vad_model_path or vad_model_path.lower() == "auto":
+        return REPO_ROOT / "vad" / "silero_vad.jit"
+    path = Path(vad_model_path).expanduser()
+    if path.is_absolute():
+        return path
+    repo_relative = REPO_ROOT / path
+    if repo_relative.exists():
+        return repo_relative
+    return path.resolve()
+
+
+def _load_silero_vad_model(vad_model_path: str):
+    model_path = _resolve_vad_model_path(vad_model_path)
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Silero VAD model not found: {model_path}")
+    cache_key = str(model_path.resolve())
+    cached = _SILERO_VAD_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    model = torch.jit.load(str(model_path), map_location="cpu")
+    model.eval()
+    _SILERO_VAD_CACHE[cache_key] = model
+    return model
+
+
+def _reset_silero_states(model) -> None:
+    try:
+        model.reset_states()
+    except Exception:
+        pass
+
+
+def _silero_predict(model, chunk: torch.Tensor, sampling_rate: int) -> float:
+    try:
+        out = model(chunk, sampling_rate)
+    except RuntimeError:
+        out = model(chunk.unsqueeze(0), sampling_rate)
+    return float(out.item())
+
+
+@torch.no_grad()
+def _get_speech_timestamps(
+    audio: torch.Tensor,
+    model,
+    *,
+    threshold: float,
+    sampling_rate: int,
+    min_speech_duration_ms: int,
+    max_speech_duration_s: float,
+    min_silence_duration_ms: int,
+    speech_pad_ms: int,
+    neg_threshold: float | None = None,
+) -> list[dict[str, int]]:
+    if audio.ndim != 1:
+        audio = audio.squeeze()
+    if audio.ndim != 1:
+        raise ValueError("Silero VAD expects a mono waveform.")
+    if sampling_rate not in {8000, 16000}:
+        raise ValueError("Silero VAD supports 8000 Hz or 16000 Hz audio.")
+
+    window_size_samples = 512 if sampling_rate == 16000 else 256
+    max_speech_duration_s = float(max_speech_duration_s or 0.0)
+    if max_speech_duration_s <= 0:
+        max_speech_duration_s = float("inf")
+
+    _reset_silero_states(model)
+    min_speech_samples = sampling_rate * int(min_speech_duration_ms) / 1000
+    speech_pad_samples = sampling_rate * int(speech_pad_ms) / 1000
+    max_speech_samples = sampling_rate * max_speech_duration_s - window_size_samples - 2 * speech_pad_samples
+    min_silence_samples = sampling_rate * int(min_silence_duration_ms) / 1000
+    min_silence_samples_at_max_speech = sampling_rate * 98 / 1000
+    audio_length_samples = int(audio.shape[-1])
+    if audio_length_samples == 0:
+        return []
+
+    speech_probs: list[float] = []
+    for current_start_sample in range(0, audio_length_samples, window_size_samples):
+        chunk = audio[current_start_sample : current_start_sample + window_size_samples]
+        if chunk.shape[-1] < window_size_samples:
+            chunk = torch.nn.functional.pad(chunk, (0, window_size_samples - chunk.shape[-1]))
+        speech_probs.append(_silero_predict(model, chunk, sampling_rate))
+
+    triggered = False
+    speeches: list[dict[str, int]] = []
+    current_speech: dict[str, int] = {}
+    if neg_threshold is None:
+        neg_threshold = max(float(threshold) - 0.15, 0.01)
+    temp_end = 0
+    prev_end = 0
+    next_start = 0
+    possible_ends: list[tuple[int, int]] = []
+
+    for i, speech_prob in enumerate(speech_probs):
+        cur_sample = window_size_samples * i
+
+        if speech_prob >= threshold and temp_end:
+            silence_duration = cur_sample - temp_end
+            if silence_duration > min_silence_samples_at_max_speech:
+                possible_ends.append((temp_end, silence_duration))
+            temp_end = 0
+            if next_start < prev_end:
+                next_start = cur_sample
+
+        if speech_prob >= threshold and not triggered:
+            triggered = True
+            current_speech["start"] = cur_sample
+            continue
+
+        if triggered and cur_sample - current_speech["start"] > max_speech_samples:
+            if possible_ends:
+                prev_end, silence_duration = max(possible_ends, key=lambda item: item[1])
+                current_speech["end"] = prev_end
+                speeches.append(current_speech)
+                current_speech = {}
+                next_start = prev_end + silence_duration
+                if next_start < cur_sample:
+                    current_speech["start"] = next_start
+                else:
+                    triggered = False
+                prev_end = next_start = temp_end = 0
+                possible_ends = []
+            else:
+                current_speech["end"] = cur_sample
+                speeches.append(current_speech)
+                current_speech = {}
+                prev_end = next_start = temp_end = 0
+                triggered = False
+                possible_ends = []
+            continue
+
+        if speech_prob < neg_threshold and triggered:
+            if not temp_end:
+                temp_end = cur_sample
+            if cur_sample - temp_end < min_silence_samples:
+                continue
+            current_speech["end"] = temp_end
+            if current_speech["end"] - current_speech["start"] > min_speech_samples:
+                speeches.append(current_speech)
+            current_speech = {}
+            prev_end = next_start = temp_end = 0
+            triggered = False
+            possible_ends = []
+
+    if current_speech and audio_length_samples - current_speech["start"] > min_speech_samples:
+        current_speech["end"] = audio_length_samples
+        speeches.append(current_speech)
+
+    for i, speech in enumerate(speeches):
+        if i == 0:
+            speech["start"] = int(max(0, speech["start"] - speech_pad_samples))
+        if i != len(speeches) - 1:
+            silence_duration = speeches[i + 1]["start"] - speech["end"]
+            if silence_duration < 2 * speech_pad_samples:
+                speech["end"] += int(silence_duration // 2)
+                speeches[i + 1]["start"] = int(max(0, speeches[i + 1]["start"] - silence_duration // 2))
+            else:
+                speech["end"] = int(min(audio_length_samples, speech["end"] + speech_pad_samples))
+                speeches[i + 1]["start"] = int(max(0, speeches[i + 1]["start"] - speech_pad_samples))
+        else:
+            speech["end"] = int(min(audio_length_samples, speech["end"] + speech_pad_samples))
+
+    return speeches
+
+
+def _format_timestamp(seconds: float, *, srt: bool = False) -> str:
+    seconds = max(float(seconds), 0.0)
+    total_millis = int(round(seconds * 1000))
+    hours, remainder = divmod(total_millis, 3600 * 1000)
+    minutes, remainder = divmod(remainder, 60 * 1000)
+    whole_seconds, millis = divmod(remainder, 1000)
+    separator = "," if srt else "."
+    return f"{hours:02}:{minutes:02}:{whole_seconds:02}{separator}{millis:03}"
 
 
 class MimoASRLoadModel:
@@ -542,6 +727,272 @@ class MimoASRAudioToText:
         return (text,)
 
 
+class SileroVADAudioSegmenter:
+    CATEGORY = "audio/Comfy-MIMOASR"
+    DESCRIPTION = "Split ComfyUI AUDIO into speech segments with Silero VAD timestamps."
+    RETURN_TYPES = ("MIMOASR_TIMED_AUDIO",)
+    RETURN_NAMES = ("timed_audio",)
+    FUNCTION = "segment"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO", {"tooltip": "ComfyUI native audio input."}),
+                "vad_model_path": (
+                    "STRING",
+                    {
+                        "default": "auto",
+                        "tooltip": "Path to silero_vad.jit. auto uses this extension's vad/silero_vad.jit.",
+                    },
+                ),
+                "threshold": (
+                    "FLOAT",
+                    {
+                        "default": 0.5,
+                        "min": 0.01,
+                        "max": 0.99,
+                        "step": 0.01,
+                        "tooltip": "Speech probability threshold. Higher values are stricter.",
+                    },
+                ),
+                "min_speech_duration_ms": (
+                    "INT",
+                    {
+                        "default": 250,
+                        "min": 0,
+                        "max": 10000,
+                        "step": 10,
+                        "tooltip": "Drop detected speech chunks shorter than this duration.",
+                    },
+                ),
+                "max_speech_duration_s": (
+                    "FLOAT",
+                    {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 3600.0,
+                        "step": 0.5,
+                        "tooltip": "Split long speech chunks near silence. Use 0 for unlimited.",
+                    },
+                ),
+                "min_silence_duration_ms": (
+                    "INT",
+                    {
+                        "default": 100,
+                        "min": 0,
+                        "max": 10000,
+                        "step": 10,
+                        "tooltip": "Silence duration needed before closing a speech chunk.",
+                    },
+                ),
+                "speech_pad_ms": (
+                    "INT",
+                    {
+                        "default": 30,
+                        "min": 0,
+                        "max": 5000,
+                        "step": 10,
+                        "tooltip": "Padding added to both sides of each detected speech chunk.",
+                    },
+                ),
+                "batch_index": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 4096,
+                        "step": 1,
+                        "tooltip": "Batch index to segment from batched AUDIO.",
+                    },
+                ),
+            }
+        }
+
+    def segment(
+        self,
+        audio,
+        vad_model_path: str,
+        threshold: float,
+        min_speech_duration_ms: int,
+        max_speech_duration_s: float,
+        min_silence_duration_ms: int,
+        speech_pad_ms: int,
+        batch_index: int,
+    ):
+        waveform, sample_rate = _select_comfy_waveform(audio, batch_index=int(batch_index))
+        vad_waveform = waveform.mean(dim=0)
+        vad_sample_rate = 16000
+        if sample_rate != vad_sample_rate:
+            vad_waveform = torchaudio.functional.resample(
+                vad_waveform,
+                orig_freq=sample_rate,
+                new_freq=vad_sample_rate,
+            )
+        vad_waveform = vad_waveform.detach().float().cpu().contiguous()
+
+        vad_model = _load_silero_vad_model(vad_model_path)
+        timestamps = _get_speech_timestamps(
+            vad_waveform,
+            vad_model,
+            threshold=float(threshold),
+            sampling_rate=vad_sample_rate,
+            min_speech_duration_ms=int(min_speech_duration_ms),
+            max_speech_duration_s=float(max_speech_duration_s),
+            min_silence_duration_ms=int(min_silence_duration_ms),
+            speech_pad_ms=int(speech_pad_ms),
+        )
+
+        total_samples = int(waveform.shape[-1])
+        duration = total_samples / sample_rate if sample_rate else 0.0
+        segments = []
+        for index, speech in enumerate(timestamps, start=1):
+            start_seconds = max(float(speech["start"]) / vad_sample_rate, 0.0)
+            end_seconds = min(float(speech["end"]) / vad_sample_rate, duration)
+            start_sample = max(0, min(total_samples, int(round(start_seconds * sample_rate))))
+            end_sample = max(start_sample, min(total_samples, int(round(end_seconds * sample_rate))))
+            if end_sample <= start_sample:
+                continue
+            segment_waveform = waveform[:, start_sample:end_sample].contiguous()
+            segment_audio = {
+                "waveform": segment_waveform.unsqueeze(0),
+                "sample_rate": sample_rate,
+            }
+            segments.append(
+                {
+                    "index": index,
+                    "start": start_seconds,
+                    "end": end_seconds,
+                    "duration": end_seconds - start_seconds,
+                    "start_sample": start_sample,
+                    "end_sample": end_sample,
+                    "sample_rate": sample_rate,
+                    "audio": segment_audio,
+                }
+            )
+
+        timed_audio = {
+            "type": "MIMOASR_TIMED_AUDIO",
+            "sample_rate": sample_rate,
+            "duration": duration,
+            "batch_index": int(batch_index),
+            "vad_sample_rate": vad_sample_rate,
+            "vad_model_path": str(_resolve_vad_model_path(vad_model_path)),
+            "segments": segments,
+        }
+        return (timed_audio,)
+
+
+class MimoASRTimedAudioToText:
+    CATEGORY = "audio/Comfy-MIMOASR"
+    DESCRIPTION = "Transcribe a timed audio segment group with MiMo ASR and keep timestamps."
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("timestamped_text",)
+    FUNCTION = "transcribe_timed"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mimo_asr_model": (
+                    "MIMOASR_MODEL",
+                    {"tooltip": "Loaded MiMo ASR model from the loader node."},
+                ),
+                "timed_audio": (
+                    "MIMOASR_TIMED_AUDIO",
+                    {"tooltip": "Timed audio group from the Silero VAD segmenter node."},
+                ),
+                "language": (
+                    ["auto", "zh", "en"],
+                    {"default": "auto", "tooltip": "Language hint for recognition."},
+                ),
+                "max_new_tokens": (
+                    "INT",
+                    {
+                        "default": 128,
+                        "min": 1,
+                        "max": 65536,
+                        "step": 1,
+                        "tooltip": "Maximum generated text token groups for each segment.",
+                    },
+                ),
+                "timestamp_format": (
+                    ["bracket", "srt", "jsonl"],
+                    {
+                        "default": "bracket",
+                        "tooltip": "Output format for segment timestamps.",
+                    },
+                ),
+                "skip_empty_segments": (
+                    "BOOLEAN",
+                    {"default": True, "tooltip": "Skip segments that return empty text."},
+                ),
+            }
+        }
+
+    def transcribe_timed(
+        self,
+        mimo_asr_model: MimoASRModelHandle,
+        timed_audio: dict[str, Any],
+        language: str,
+        max_new_tokens: int,
+        timestamp_format: str,
+        skip_empty_segments: bool,
+    ):
+        if not isinstance(timed_audio, dict) or "segments" not in timed_audio:
+            raise TypeError("Expected MIMOASR_TIMED_AUDIO input from the Silero VAD segmenter node.")
+
+        rendered: list[str] = []
+        srt_index = 1
+        for output_index, segment in enumerate(timed_audio.get("segments") or [], start=1):
+            segment_audio = segment.get("audio")
+            if not isinstance(segment_audio, dict):
+                continue
+            waveform = _audio_from_comfy(
+                segment_audio,
+                target_sample_rate=mimo_asr_model.target_sample_rate,
+                batch_index=0,
+            )
+            text = mimo_asr_model.transcribe(
+                waveform,
+                language=language,
+                max_new_tokens=int(max_new_tokens),
+                audio_start_seconds=0.0,
+                audio_duration_seconds=0.0,
+            ).strip()
+            if skip_empty_segments and not text:
+                continue
+
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", start))
+            if timestamp_format == "srt":
+                rendered.extend(
+                    [
+                        str(srt_index),
+                        f"{_format_timestamp(start, srt=True)} --> {_format_timestamp(end, srt=True)}",
+                        text,
+                        "",
+                    ]
+                )
+                srt_index += 1
+            elif timestamp_format == "jsonl":
+                rendered.append(
+                    json.dumps(
+                        {
+                            "index": output_index,
+                            "start": start,
+                            "end": end,
+                            "text": text,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                rendered.append(f"[{_format_timestamp(start)} --> {_format_timestamp(end)}] {text}")
+
+        return ("\n".join(rendered).strip(),)
+
+
 class MimoASRUnloadModel:
     CATEGORY = "audio/Comfy-MIMOASR"
     DESCRIPTION = "Release a loaded MiMo ASR model and optionally clear CUDA cache."
@@ -645,6 +1096,8 @@ class MimoASRSaveText:
 NODE_CLASS_MAPPINGS = {
     "MimoASRLoadModel": MimoASRLoadModel,
     "MimoASRAudioToText": MimoASRAudioToText,
+    "SileroVADAudioSegmenter": SileroVADAudioSegmenter,
+    "MimoASRTimedAudioToText": MimoASRTimedAudioToText,
     "MimoASRUnloadModel": MimoASRUnloadModel,
     "MimoASRSaveText": MimoASRSaveText,
 }
@@ -652,6 +1105,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MimoASRLoadModel": "MiMo ASR Load Model",
     "MimoASRAudioToText": "MiMo ASR Audio To Text",
+    "SileroVADAudioSegmenter": "SILERO-VAD Audio Segmenter",
+    "MimoASRTimedAudioToText": "MiMo ASR Timed Audio To Text",
     "MimoASRUnloadModel": "MiMo ASR Release Model",
     "MimoASRSaveText": "MiMo ASR Save Text",
 }

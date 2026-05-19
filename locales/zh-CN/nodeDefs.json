@@ -150,6 +150,96 @@
       }
     }
   },
+  "SileroVADAudioSegmenter": {
+    "display_name": "SILERO-VAD 音频分割",
+    "description": "使用 Silero VAD 将 ComfyUI 音频切分为带时间戳的语音片段组。",
+    "inputs": {
+      "audio": {
+        "name": "音频",
+        "tooltip": "ComfyUI 原生音频输入。"
+      },
+      "vad_model_path": {
+        "name": "VAD 模型路径",
+        "tooltip": "silero_vad.jit 的路径。auto 表示使用本扩展的 vad/silero_vad.jit。"
+      },
+      "threshold": {
+        "name": "语音阈值",
+        "tooltip": "语音概率阈值。数值越高，判定越严格。"
+      },
+      "min_speech_duration_ms": {
+        "name": "最短语音时长",
+        "tooltip": "丢弃短于该时长的语音片段，单位毫秒。"
+      },
+      "max_speech_duration_s": {
+        "name": "最长语音时长",
+        "tooltip": "超过该时长的语音片段会尽量在静音处拆分。设为 0 表示不限制。"
+      },
+      "min_silence_duration_ms": {
+        "name": "最短静音时长",
+        "tooltip": "结束一个语音片段前需要持续静音的时长，单位毫秒。"
+      },
+      "speech_pad_ms": {
+        "name": "语音边缘填充",
+        "tooltip": "添加到每个语音片段两端的填充时长，单位毫秒。"
+      },
+      "batch_index": {
+        "name": "批次索引",
+        "tooltip": "从批量音频中选择要分割的批次索引。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "时序音频组",
+        "tooltip": "带 start/end 时间戳和对应 AUDIO 片段的字典。"
+      }
+    }
+  },
+  "MimoASRTimedAudioToText": {
+    "display_name": "MiMo ASR 时序音频转文本",
+    "description": "循环识别时序音频组中的每个片段，并输出带时间戳的文本。",
+    "inputs": {
+      "mimo_asr_model": {
+        "name": "MiMo ASR 模型",
+        "tooltip": "由加载模型节点输出的 MiMo ASR 模型。"
+      },
+      "timed_audio": {
+        "name": "时序音频组",
+        "tooltip": "由 SILERO-VAD 音频分割节点输出的时序音频组。"
+      },
+      "language": {
+        "name": "语言",
+        "tooltip": "语音识别的语言提示。",
+        "options": {
+          "auto": "自动",
+          "zh": "中文",
+          "en": "英文"
+        }
+      },
+      "max_new_tokens": {
+        "name": "每段最大新词元数",
+        "tooltip": "每个语音片段生成文本词元组的最大数量。"
+      },
+      "timestamp_format": {
+        "name": "时间戳格式",
+        "tooltip": "带时间戳文本的输出格式。",
+        "options": {
+          "bracket": "方括号",
+          "srt": "SRT",
+          "jsonl": "JSONL"
+        }
+      },
+      "skip_empty_segments": {
+        "name": "跳过空片段",
+        "tooltip": "跳过识别结果为空的语音片段。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "带时间戳文本",
+        "tooltip": "每个语音片段对应一行或一个条目的识别文本。"
+      }
+    }
+  },
   "MimoASRUnloadModel": {
     "display_name": "MiMo ASR 释放模型",
     "description": "释放已加载的 MiMo ASR 模型，并可清理 CUDA 缓存。",

@@ -8,6 +8,8 @@ Comfy-MIMOASR wraps Xiaomi MiMo-V2.5-ASR as native ComfyUI audio nodes.
 | --- | --- |
 | `MiMo ASR Load Model` | Loads MiMo-V2.5-ASR and MiMo-Audio-Tokenizer. |
 | `MiMo ASR Audio To Text` | Converts ComfyUI `AUDIO` input to a text transcript. |
+| `SILERO-VAD Audio Segmenter` | Splits ComfyUI `AUDIO` into timestamped speech segments. |
+| `MiMo ASR Timed Audio To Text` | Runs ASR over each timestamped segment and returns timestamped text. |
 | `MiMo ASR Release Model` | Releases the loaded model weights and clears CUDA cache. |
 | `MiMo ASR Save Text` | Saves input text as an auto-numbered `.txt` file. |
 
@@ -17,6 +19,10 @@ By default the loader uses ComfyUI's main `models` folder:
 
 ```text
 ComfyUI/
+  custom_nodes/
+    Comfy-MIMOASR/
+      vad/
+        silero_vad.jit
   models/
     MiMo-Audio-Tokenizer/
     MiMo-V2.5-ASR/
@@ -59,6 +65,18 @@ chunk size, progress logging, and bitsandbytes-compatible options.
 The transcription node exposes language hint, generation token limit, audio
 start offset, duration clipping, and batch selection for batched ComfyUI audio.
 The default generation token limit is 128.
+
+For timestamped transcription:
+
+1. Connect ComfyUI native `AUDIO` to `SILERO-VAD Audio Segmenter`.
+2. Keep `vad_model_path` as `auto` when `vad/silero_vad.jit` exists in this
+   extension folder.
+3. Connect `timed_audio` to `MiMo ASR Timed Audio To Text`.
+4. Choose `bracket`, `srt`, or `jsonl` timestamp output.
+
+The timed audio output is a dictionary with a `segments` list. Each segment
+contains `start`, `end`, `duration`, sample coordinates, and a ComfyUI-style
+`audio` dictionary for that slice.
 
 The save text node defaults to ComfyUI's `output` directory and names files like
 `transcript_00001_.txt`. Use `filename_prefix` for output subfolders or
