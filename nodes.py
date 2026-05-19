@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import gc
+import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,11 @@ LANGUAGE_TAGS = {
 
 _MODEL_CACHE: dict[tuple[Any, ...], "MimoASRModelHandle"] = {}
 _SILERO_VAD_CACHE: dict[str, Any] = {}
+
+
+def _check_comfy_interrupt() -> None:
+    if model_management is not None and hasattr(model_management, "throw_exception_if_processing_interrupted"):
+        model_management.throw_exception_if_processing_interrupted()
 
 
 def _comfy_models_dir() -> Path:
@@ -260,6 +267,7 @@ class MimoASRModelHandle:
         if self.model is None:
             raise RuntimeError("MiMo ASR model has been released. Run the loader node again.")
         duration = None if audio_duration_seconds <= 0 else float(audio_duration_seconds)
+        _check_comfy_interrupt()
         with torch.inference_mode():
             return self.model.asr_sft(
                 audio,
@@ -267,6 +275,7 @@ class MimoASRModelHandle:
                 max_new_tokens=int(max_new_tokens),
                 audio_start_seconds=float(audio_start_seconds),
                 audio_duration_seconds=duration,
+                interrupt_callback=_check_comfy_interrupt,
             )
 
 
@@ -381,6 +390,7 @@ def _get_speech_timestamps(
 
     speech_probs: list[float] = []
     for current_start_sample in range(0, audio_length_samples, window_size_samples):
+        _check_comfy_interrupt()
         chunk = audio[current_start_sample : current_start_sample + window_size_samples]
         if chunk.shape[-1] < window_size_samples:
             chunk = torch.nn.functional.pad(chunk, (0, window_size_samples - chunk.shape[-1]))
@@ -476,6 +486,237 @@ def _format_timestamp(seconds: float, *, srt: bool = False) -> str:
     whole_seconds, millis = divmod(remainder, 1000)
     separator = "," if srt else "."
     return f"{hours:02}:{minutes:02}:{whole_seconds:02}{separator}{millis:03}"
+
+
+def _format_ass_timestamp(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    total_centis = int(round(seconds * 100))
+    hours, remainder = divmod(total_centis, 3600 * 100)
+    minutes, remainder = divmod(remainder, 60 * 100)
+    whole_seconds, centis = divmod(remainder, 100)
+    return f"{hours}:{minutes:02}:{whole_seconds:02}.{centis:02}"
+
+
+def _stringify_transcript_input(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_stringify_transcript_input(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _parse_time_value(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", ".")
+    parts = text.split(":")
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return int(minutes) * 60 + float(seconds)
+    return float(text)
+
+
+def _first_present(item: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in item:
+            return item[key]
+    return None
+
+
+def _segments_from_candidates(candidates: Any) -> list[dict[str, Any]]:
+    if isinstance(candidates, dict):
+        if isinstance(candidates.get("segments"), list):
+            candidates = candidates["segments"]
+        elif isinstance(candidates.get("data"), list):
+            candidates = candidates["data"]
+        else:
+            candidates = [candidates]
+    if not isinstance(candidates, list):
+        return []
+
+    segments: list[dict[str, Any]] = []
+    for index, item in enumerate(candidates, start=1):
+        if isinstance(item, str):
+            segments.extend(_parse_timestamped_jsonl(item))
+            continue
+        if not isinstance(item, dict):
+            continue
+        timestamps = item.get("timestamp") or item.get("timestamps")
+        start_value = _first_present(item, ("start", "start_seconds", "start_time", "begin", "from"))
+        end_value = _first_present(item, ("end", "end_seconds", "end_time", "stop", "to"))
+        if (start_value is None or end_value is None) and isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
+            start_value = timestamps[0]
+            end_value = timestamps[1]
+        if start_value is None or end_value is None:
+            continue
+        try:
+            start = _parse_time_value(start_value)
+            end = _parse_time_value(end_value)
+        except (TypeError, ValueError):
+            continue
+        text = _first_present(item, ("text", "transcript", "content", "sentence", "line"))
+        segments.append(
+            {
+                "index": int(item.get("index") or item.get("id") or index),
+                "start": max(start, 0.0),
+                "end": max(end, start),
+                "text": str(text or "").strip(),
+            }
+        )
+    return segments
+
+
+def _parse_srt_or_bracket_timestamps(text: str) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    lines = [line.strip("\ufeff") for line in text.splitlines()]
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            index += 1
+            continue
+        if line.isdigit() and index + 1 < len(lines):
+            index += 1
+            line = lines[index].strip()
+        if "-->" not in line:
+            index += 1
+            continue
+        start_text, end_text = [part.strip() for part in line.split("-->", 1)]
+        start_text = start_text.lstrip("[")
+        end_text = end_text.rstrip("]")
+        index += 1
+        text_lines = []
+        while index < len(lines) and lines[index].strip():
+            text_lines.append(lines[index].strip())
+            index += 1
+        try:
+            start = _parse_time_value(start_text)
+            end = _parse_time_value(end_text)
+        except (TypeError, ValueError):
+            continue
+        segments.append(
+            {
+                "index": len(segments) + 1,
+                "start": max(start, 0.0),
+                "end": max(end, start),
+                "text": "\n".join(text_lines).strip(),
+            }
+        )
+
+    if segments:
+        return segments
+
+    pattern = re.compile(r"\[(?P<start>[0-9:.,]+)\s*-->\s*(?P<end>[0-9:.,]+)\]\s*(?P<text>.*)")
+    for line in lines:
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        try:
+            start = _parse_time_value(match.group("start"))
+            end = _parse_time_value(match.group("end"))
+        except (TypeError, ValueError):
+            continue
+        segments.append(
+            {
+                "index": len(segments) + 1,
+                "start": max(start, 0.0),
+                "end": max(end, start),
+                "text": match.group("text").strip(),
+            }
+        )
+    return segments
+
+
+def _parse_timestamped_jsonl(text: Any) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    stripped = _stringify_transcript_input(text or "").strip()
+    if not stripped:
+        return segments
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        data = None
+    if data is None and stripped[:1] in "[{":
+        try:
+            data = ast.literal_eval(stripped)
+        except (SyntaxError, ValueError):
+            data = None
+    if data is not None:
+        segments = _segments_from_candidates(data)
+        if segments:
+            return segments
+
+    candidates = []
+    for line in stripped.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            candidates.append(json.loads(line))
+            continue
+        except json.JSONDecodeError:
+            pass
+        try:
+            literal = ast.literal_eval(line)
+        except (SyntaxError, ValueError):
+            return _parse_srt_or_bracket_timestamps(stripped)
+        if isinstance(literal, (list, tuple)):
+            candidates.extend(literal)
+        else:
+            candidates.append(literal)
+
+    segments = _segments_from_candidates(candidates)
+    if segments:
+        return segments
+    return _parse_srt_or_bracket_timestamps(stripped)
+
+
+def _render_srt(segments: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for output_index, segment in enumerate(segments, start=1):
+        blocks.extend(
+            [
+                str(output_index),
+                f"{_format_timestamp(segment['start'], srt=True)} --> {_format_timestamp(segment['end'], srt=True)}",
+                str(segment.get("text", "")),
+                "",
+            ]
+        )
+    return "\n".join(blocks).strip()
+
+
+def _render_ass(segments: list[dict[str, Any]]) -> str:
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "YCbCr Matrix: TV.709",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    lines = []
+    for segment in segments:
+        text = str(segment.get("text", "")).replace("\n", "\\N")
+        lines.append(
+            "Dialogue: 0,"
+            f"{_format_ass_timestamp(segment['start'])},"
+            f"{_format_ass_timestamp(segment['end'])},"
+            f"Default,,0,0,0,,{text}"
+        )
+    return "\n".join(header + lines).strip()
+
+
+_EMPTY_TRANSCRIPT_MESSAGE = "No transcript text was generated."
 
 
 class MimoASRLoadModel:
@@ -587,6 +828,7 @@ class MimoASRLoadModel:
     ):
         from src.mimo_audio.mimo_audio import MimoAudio
 
+        _check_comfy_interrupt()
         root = _resolve_model_root(model_root)
         asr_dir, audio_tokenizer_dir, default_cache_dir = _ensure_models(
             root,
@@ -628,6 +870,7 @@ class MimoASRLoadModel:
             progress=bool(progress),
             progress_interval=float(progress_interval),
         )
+        _check_comfy_interrupt()
         handle = MimoASRModelHandle(
             model=model,
             cache_key=key,
@@ -820,6 +1063,7 @@ class SileroVADAudioSegmenter:
         speech_pad_ms: int,
         batch_index: int,
     ):
+        _check_comfy_interrupt()
         waveform, sample_rate = _select_comfy_waveform(audio, batch_index=int(batch_index))
         vad_waveform = waveform.mean(dim=0)
         vad_sample_rate = 16000
@@ -847,6 +1091,7 @@ class SileroVADAudioSegmenter:
         duration = total_samples / sample_rate if sample_rate else 0.0
         segments = []
         for index, speech in enumerate(timestamps, start=1):
+            _check_comfy_interrupt()
             start_seconds = max(float(speech["start"]) / vad_sample_rate, 0.0)
             end_seconds = min(float(speech["end"]) / vad_sample_rate, duration)
             start_sample = max(0, min(total_samples, int(round(start_seconds * sample_rate))))
@@ -945,6 +1190,7 @@ class MimoASRTimedAudioToText:
         rendered: list[str] = []
         srt_index = 1
         for output_index, segment in enumerate(timed_audio.get("segments") or [], start=1):
+            _check_comfy_interrupt()
             segment_audio = segment.get("audio")
             if not isinstance(segment_audio, dict):
                 continue
@@ -1022,17 +1268,31 @@ class MimoASRUnloadModel:
 
 class MimoASRSaveText:
     CATEGORY = "audio/Comfy-MIMOASR"
-    DESCRIPTION = "Save input text as a numbered txt file."
+    DESCRIPTION = "Save transcript text, JSON, JSONL, SRT, ASS, or a custom extension as a numbered file."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("saved_path",)
-    FUNCTION = "save_text"
+    FUNCTION = "save_transcript"
     OUTPUT_NODE = True
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text": ("STRING", {"forceInput": True, "tooltip": "Text to save."}),
+                "text": ("STRING", {"forceInput": True, "tooltip": "Transcript text or timestamped JSONL to save."}),
+                "file_format": (
+                    ["txt", "json", "jsonl", "srt", "ass", "custom"],
+                    {
+                        "default": "txt",
+                        "tooltip": "Output format. SRT/ASS are generated from timestamped JSONL.",
+                    },
+                ),
+                "custom_extension": (
+                    "STRING",
+                    {
+                        "default": "txt",
+                        "tooltip": "File extension used when file_format is custom.",
+                    },
+                ),
                 "filename_prefix": (
                     "STRING",
                     {
@@ -1050,7 +1310,16 @@ class MimoASRSaveText:
             }
         }
 
-    def save_text(self, text: str, filename_prefix: str = "Comfy-MIMOASR/transcript", output_directory: str = "auto"):
+    def save_transcript(
+        self,
+        text: str,
+        file_format: str = "txt",
+        custom_extension: str = "txt",
+        filename_prefix: str = "Comfy-MIMOASR/transcript",
+        output_directory: str = "auto",
+    ):
+        _check_comfy_interrupt()
+        content, extension = self._format_content(text, file_format, custom_extension)
         save_root = (output_directory or "auto").strip()
         if not save_root or save_root.lower() == "auto":
             output_dir = _comfy_output_dir()
@@ -1073,16 +1342,17 @@ class MimoASRSaveText:
             output_folder = output_dir / subfolder
             output_folder.mkdir(parents=True, exist_ok=True)
             existing = []
-            for path in output_folder.glob(f"{filename}_*.txt"):
+            for path in output_folder.glob(f"{filename}_*.{extension}"):
                 suffix = path.stem.removeprefix(f"{filename}_").split("_", 1)[0]
                 if suffix.isdigit():
                     existing.append(int(suffix))
             counter = max(existing, default=0) + 1
 
         output_folder.mkdir(parents=True, exist_ok=True)
-        file = f"{filename}_{counter:05}_.txt"
+        file = f"{filename}_{counter:05}_.{extension}"
         saved_path = output_folder / file
-        saved_path.write_text(str(text), encoding="utf-8")
+        _check_comfy_interrupt()
+        saved_path.write_text(content, encoding="utf-8")
 
         return {
             "ui": {
@@ -1091,6 +1361,49 @@ class MimoASRSaveText:
             },
             "result": (str(saved_path),),
         }
+
+    def _format_content(self, text: str, file_format: str, custom_extension: str) -> tuple[str, str]:
+        value = _stringify_transcript_input(text)
+        selected = (file_format or "txt").strip().lower()
+        if selected == "custom":
+            extension = (custom_extension or "txt").strip().lower().lstrip(".") or "txt"
+            extension = "".join(ch for ch in extension if ch.isalnum() or ch in ("-", "_")) or "txt"
+            return value, extension
+        if selected in {"txt", "jsonl"}:
+            return value, selected
+        if selected == "json":
+            segments = _parse_timestamped_jsonl(value)
+            if segments:
+                return json.dumps({"segments": segments}, ensure_ascii=False, indent=2), "json"
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = {"text": value}
+            return json.dumps(parsed, ensure_ascii=False, indent=2), "json"
+        if selected == "srt":
+            if "-->" in value and not _parse_timestamped_jsonl(value):
+                return value, "srt"
+            segments = _parse_timestamped_jsonl(value)
+            if not segments:
+                if not value.strip():
+                    return _render_srt(
+                        [{"index": 1, "start": 0.0, "end": 3.0, "text": _EMPTY_TRANSCRIPT_MESSAGE}]
+                    ), "srt"
+                raise ValueError("SRT output requires timestamped JSONL with start, end, and text fields.")
+            return _render_srt(segments), "srt"
+        if selected == "ass":
+            segments = _parse_timestamped_jsonl(value)
+            if not segments:
+                if not value.strip():
+                    return _render_ass(
+                        [{"index": 1, "start": 0.0, "end": 3.0, "text": _EMPTY_TRANSCRIPT_MESSAGE}]
+                    ), "ass"
+                raise ValueError("ASS output requires timestamped JSONL with start, end, and text fields.")
+            return _render_ass(segments), "ass"
+        return value, "txt"
+
+    def save_text(self, text: str, filename_prefix: str = "Comfy-MIMOASR/transcript", output_directory: str = "auto"):
+        return self.save_transcript(text, "txt", "txt", filename_prefix, output_directory)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1108,5 +1421,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SileroVADAudioSegmenter": "SILERO-VAD Audio Segmenter",
     "MimoASRTimedAudioToText": "MiMo ASR Timed Audio To Text",
     "MimoASRUnloadModel": "MiMo ASR Release Model",
-    "MimoASRSaveText": "MiMo ASR Save Text",
+    "MimoASRSaveText": "MiMo ASR Save Transcript",
 }

@@ -1248,13 +1248,21 @@ class MimoAudio:
 
         return feature_groups, len_groups
 
-    def encode_batch(self, input_features: torch.Tensor, input_lens: torch.Tensor, max_length: int = 256000):
+    def encode_batch(
+        self,
+        input_features: torch.Tensor,
+        input_lens: torch.Tensor,
+        max_length: int = 256000,
+        interrupt_callback=None,
+    ):
         feature_groups, len_groups = self.group_by_length(input_features, input_lens, max_length)
 
         encoded_parts = []
         tokenizer_dtype = next(self.mimo_audio_tokenizer.parameters()).dtype
         groups = list(zip(feature_groups, len_groups))
         for group_idx, (features, lengths) in enumerate(groups, start=1):
+            if interrupt_callback is not None:
+                interrupt_callback()
             self._progress(
                 "Audio tokenizer encode "
                 f"group {group_idx}/{len(groups)}: frames={features.size(0)}, "
@@ -1286,7 +1294,10 @@ class MimoAudio:
         *,
         start_seconds: float = 0.0,
         duration_seconds: float | None = None,
+        interrupt_callback=None,
     ):
+        if interrupt_callback is not None:
+            interrupt_callback()
         target_sr = self.mimo_audio_tokenizer.config.sampling_rate
         if isinstance(input, torch.Tensor):
             self._progress(
@@ -1375,6 +1386,8 @@ class MimoAudio:
             self._progress_iter(chunk_ranges, desc="Audio chunks", unit="chunk"),
             start=1,
         ):
+            if interrupt_callback is not None:
+                interrupt_callback()
             chunk_start = time.monotonic()
             chunk = wav[start:end]
             # Zero-pad if the entire audio is shorter than n_fft.
@@ -1395,6 +1408,7 @@ class MimoAudio:
             codes_chunk = self.encode_batch(
                 input_features=mel,
                 input_lens=torch.tensor([mel.size(0)]),
+                interrupt_callback=interrupt_callback,
             )
             code_parts.append(codes_chunk)
             self._progress(
@@ -1451,13 +1465,19 @@ class MimoAudio:
         *,
         audio_start_seconds: float = 0.0,
         audio_duration_seconds: float | None = None,
+        interrupt_callback=None,
     ):
+        if interrupt_callback is not None:
+            interrupt_callback()
         self._progress(f"ASR prompt start: audio_tag={audio_tag or '<auto>'}")
         audio_tokenized = self.preprocess_input(
             input,
             start_seconds=audio_start_seconds,
             duration_seconds=audio_duration_seconds,
+            interrupt_callback=interrupt_callback,
         )
+        if interrupt_callback is not None:
+            interrupt_callback()
 
         if '<chinese>' in audio_tag:
             template = random.choice(asr_zh_templates)
@@ -1511,7 +1531,10 @@ class MimoAudio:
         min_new_tokens=0,
         max_new_tokens=8192,
         task_name=None,
+        interrupt_callback=None,
     ):
+        if interrupt_callback is not None:
+            interrupt_callback()
 
         task_sampler = self.get_task_sampler(task_name)
 
@@ -1540,6 +1563,8 @@ class MimoAudio:
         generated_text_token_ids: list[int] = []
 
         def generation_progress(event):
+            if interrupt_callback is not None:
+                interrupt_callback()
             if event["event"] == "start":
                 self._progress(
                     f"Generation loop entered: budget={event['total_new_tokens']} "
@@ -1620,7 +1645,10 @@ class MimoAudio:
         max_new_tokens=8192,
         audio_start_seconds: float = 0.0,
         audio_duration_seconds: float | None = None,
+        interrupt_callback=None,
     ):
+        if interrupt_callback is not None:
+            interrupt_callback()
         stopping_criteria = [
             MiMoStopper(
                 stop_tokens=[self.tokenizer.eos_token_id, self.im_end_idx],
@@ -1633,12 +1661,14 @@ class MimoAudio:
             audio_tag,
             audio_start_seconds=audio_start_seconds,
             audio_duration_seconds=audio_duration_seconds,
+            interrupt_callback=interrupt_callback,
         )
         result = self.forward(
             input_ids,
             stopping_criteria=stopping_criteria,
             task_name="asr",
             max_new_tokens=max_new_tokens,
+            interrupt_callback=interrupt_callback,
         )
         if '<chinese>' in result or '<english>' in result:
             result = result.replace('<chinese>', '').replace('<english>', '').strip()

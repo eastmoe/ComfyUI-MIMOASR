@@ -11,7 +11,7 @@ Comfy-MIMOASR wraps Xiaomi MiMo-V2.5-ASR as native ComfyUI audio nodes.
 | `SILERO-VAD Audio Segmenter` | Splits ComfyUI `AUDIO` into timestamped speech segments. |
 | `MiMo ASR Timed Audio To Text` | Runs ASR over each timestamped segment and returns timestamped text. |
 | `MiMo ASR Release Model` | Releases the loaded model weights and clears CUDA cache. |
-| `MiMo ASR Save Text` | Saves input text as an auto-numbered `.txt` file. |
+| `MiMo ASR Save Transcript` | Saves transcripts as auto-numbered `.txt`, `.json`, `.jsonl`, `.srt`, `.ass`, or custom-extension files. |
 
 ## Model Layout
 
@@ -55,7 +55,7 @@ Restart ComfyUI after installation.
 2. Connect its `mimo_asr_model` output to `MiMo ASR Audio To Text`.
 3. Connect a ComfyUI native `AUDIO` output to the `audio` input.
 4. Use the returned `STRING` output as transcript text.
-5. Optionally connect the transcript to `MiMo ASR Save Text` to write a `.txt` file.
+5. Optionally connect the transcript to `MiMo ASR Save Transcript` to write a transcript file.
 6. Optionally run `MiMo ASR Release Model` when you want to unload weights.
 
 The loader exposes the same core loading controls as the original demo:
@@ -72,15 +72,22 @@ For timestamped transcription:
 2. Keep `vad_model_path` as `auto` when `vad/silero_vad.jit` exists in this
    extension folder.
 3. Connect `timed_audio` to `MiMo ASR Timed Audio To Text`.
-4. Choose `bracket`, `srt`, or `jsonl` timestamp output.
+4. Choose `bracket`, `srt`, or `jsonl` timestamp output. Use `jsonl` when you want the save node to generate `.srt` or `.ass` subtitles.
 
 The timed audio output is a dictionary with a `segments` list. Each segment
 contains `start`, `end`, `duration`, sample coordinates, and a ComfyUI-style
 `audio` dictionary for that slice.
 
-The save text node defaults to ComfyUI's `output` directory and names files like
-`transcript_00001_.txt`. Use `filename_prefix` for output subfolders or
-`output_directory` for a custom save directory.
+The save transcript node defaults to ComfyUI's `output` directory and names
+files like `transcript_00001_.txt`. Use `filename_prefix` for output subfolders
+or `output_directory` for a custom save directory. `file_format` controls the
+extension and content conversion. `srt` and `ass` are generated from timestamped
+JSONL lines with `start`, `end`, and `text` fields, such as the `jsonl` output
+from `MiMo ASR Timed Audio To Text`.
+
+Long-running MiMo ASR nodes check ComfyUI's interrupt flag during VAD scanning,
+audio preprocessing, segment loops, and generation, so the ComfyUI cancel button
+can stop queued work instead of waiting for the full transcription to finish.
 
 ## Localization
 

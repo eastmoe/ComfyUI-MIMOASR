@@ -261,12 +261,28 @@
     }
   },
   "MimoASRSaveText": {
-    "display_name": "MiMo ASR 保存文本",
-    "description": "将输入文本保存为自动编号的 txt 文件。",
+    "display_name": "MiMo ASR 保存转录",
+    "description": "将转录文本保存为自动编号的 txt、json、jsonl、srt、ass 或自定义扩展名文件。",
     "inputs": {
       "text": {
-        "name": "文本",
-        "tooltip": "需要保存的文本。"
+        "name": "转录文本",
+        "tooltip": "需要保存的转录文本，或由时序音频转文本节点输出的 JSONL。"
+      },
+      "file_format": {
+        "name": "文件格式",
+        "tooltip": "输出文件格式。SRT/ASS 会从带 start/end/text 字段的 JSONL 生成。",
+        "options": {
+          "txt": "TXT",
+          "json": "JSON",
+          "jsonl": "JSONL",
+          "srt": "SRT",
+          "ass": "ASS",
+          "custom": "自定义"
+        }
+      },
+      "custom_extension": {
+        "name": "自定义扩展名",
+        "tooltip": "当文件格式为自定义时使用的扩展名，例如 md、csv、vtt。"
       },
       "filename_prefix": {
         "name": "文件名前缀",
@@ -280,7 +296,7 @@
     "outputs": {
       "0": {
         "name": "保存路径",
-        "tooltip": "已保存 txt 文件的完整路径。"
+        "tooltip": "已保存转录文件的完整路径。"
       }
     }
   }
