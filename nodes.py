@@ -720,7 +720,7 @@ _EMPTY_TRANSCRIPT_MESSAGE = "No transcript text was generated."
 
 
 class MimoASRLoadModel:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Load MiMo-V2.5-ASR and MiMo-Audio-Tokenizer for transcription."
     RETURN_TYPES = ("MIMOASR_MODEL",)
     RETURN_NAMES = ("mimo_asr_model",)
@@ -883,7 +883,7 @@ class MimoASRLoadModel:
 
 
 class MimoASRAudioToText:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Transcribe ComfyUI AUDIO input with a loaded MiMo ASR model."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
@@ -971,7 +971,7 @@ class MimoASRAudioToText:
 
 
 class SileroVADAudioSegmenter:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Split ComfyUI AUDIO into speech segments with Silero VAD timestamps."
     RETURN_TYPES = ("MIMOASR_TIMED_AUDIO",)
     RETURN_NAMES = ("timed_audio",)
@@ -1129,7 +1129,7 @@ class SileroVADAudioSegmenter:
 
 
 class MimoASRTimedAudioToText:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Transcribe a timed audio segment group with MiMo ASR and keep timestamps."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("timestamped_text",)
@@ -1240,7 +1240,7 @@ class MimoASRTimedAudioToText:
 
 
 class MimoASRUnloadModel:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Release a loaded MiMo ASR model and optionally clear CUDA cache."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("status",)
@@ -1267,7 +1267,7 @@ class MimoASRUnloadModel:
 
 
 class MimoASRSaveText:
-    CATEGORY = "audio/Comfy-MIMOASR"
+    CATEGORY = "eastmoe/Comfy-MIMOASR"
     DESCRIPTION = "Save transcript text, JSON, JSONL, SRT, ASS, or a custom extension as a numbered file."
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("saved_path",)
